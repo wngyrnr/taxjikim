@@ -49,6 +49,14 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         rooms.computeIfAbsent(roomId, key -> ConcurrentHashMap.newKeySet()).add(session);
         log.debug("채팅 연결: sessionId={}, roomId={}, userId={}", session.getId(), roomId,
                 session.getAttributes().get("userId"));
+
+        // 연결되는 순간 "그 방을 보고 있다"고 간주해, 접속 전에 상대가 쌓아둔 안읽은 메시지를 바로 읽음 처리한다.
+        // 연결 중 새로 오는 메시지는 deliverToCounterpart가 전달 시점에 처리하므로, 여기서는 접속 시점의 backlog만 다룬다.
+        Long userId = (Long) session.getAttributes().get("userId");
+        String role = (String) session.getAttributes().get("role");
+        if (userId != null) {
+            markAsReadQuietly(Long.valueOf(roomId), userId, role);
+        }
     }
 
     // 클라이언트가 메시지를 보낼 때마다 호출된다. (연결을 끊고 싶을 때 보내는 "quit", 하트비트용 "ping"만 예외로 처리)
