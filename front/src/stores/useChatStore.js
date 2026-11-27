@@ -10,6 +10,7 @@ import {
   getMemberMessages,
   markMemberRead,
   getMemberUnreadCount,
+  getMyChatHistory,
   closeMemberRoom,
   getAdminRooms,
   getAdminRoom,
@@ -165,8 +166,15 @@ function useRoomMessages({
 
 /** 회원 채팅 위젯 전용 훅. open(패널 열림)이 true인 동안만 실시간 연결한다. */
 export function useMemberChat(open, myUserId, loggedIn) {
-  const { room, setRoom, roomLoading, roomError, loadRoom: fetchRoom, resetRoom } = useMemberRoomStore();
+  const { room: openRoom, setRoom, roomLoading, roomError, loaded: roomLoaded, loadRoom: fetchRoom, resetRoom } =
+    useMemberRoomStore();
   const [badgeCount, setBadgeCount] = useState(0);
+  // 열린 방이 없을 때 "안읽은 메시지가 남은 가장 최근 종료 상담" 1건을 담아 둔다.
+  // getMyRoom()은 열린 방(WAITING/IN_PROGRESS)만 돌려주므로, 상담이 종료되면 관리자의 마지막 답변과
+  // 종료 안내를 위젯에서 다시 볼 방법이 없었다. 안읽은 게 남아 있을 때만 한 번 보여주고 바로 읽음 처리해서
+  // 그 다음에 패널을 열면 평소처럼 새 상담 화면이 되게 한다.
+  const [closedRoom, setClosedRoom] = useState(null);
+  const room = openRoom ?? closedRoom;
 
   const loadRoom = useCallback(() => fetchRoom(myUserId, true), [fetchRoom, myUserId]);
 
@@ -174,6 +182,7 @@ export function useMemberChat(open, myUserId, loggedIn) {
   useEffect(() => {
     if (!loggedIn) {
       resetRoom();
+      setClosedRoom(null);
       return;
     }
     fetchRoom(myUserId);
@@ -183,6 +192,34 @@ export function useMemberChat(open, myUserId, loggedIn) {
   useEffect(() => {
     if (open && loggedIn) loadRoom();
   }, [open, loggedIn, loadRoom]);
+
+  // 열린 방이 없는 것으로 확인되면(roomLoaded && !openRoom) 종료 상담 목록의 최신 1건을 보고,
+  // 아직 안읽은 메시지가 남아 있을 때만 보여줄 대상으로 잡는다. 찾았을 때만 설정하고 지우지는 않는다 —
+  // 회원이 읽는 중에 이 조회가 다시 돌아 화면이 비워지면 안 되기 때문이다. 정리는 아래 effect가 담당한다.
+  useEffect(() => {
+    if (!loggedIn || !roomLoaded || openRoom) return undefined;
+    let alive = true;
+    getMyChatHistory()
+      .then((result) => {
+        const latest = result.data?.[0];
+        if (!latest) return null;
+        return getMemberUnreadCount(latest.roomId).then((unread) =>
+          unread.data > 0 ? { ...latest, status: 'CLOSED' } : null
+        );
+      })
+      .then((found) => {
+        if (alive && found) setClosedRoom(found);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [loggedIn, roomLoaded, openRoom, open]);
+
+  // 패널을 닫으면(= 회원이 보고 나갔으면) 종료 상담은 잊는다. 그래야 다음에 열 때 새 상담을 시작할 수 있다.
+  useEffect(() => {
+    if (!open) setClosedRoom(null);
+  }, [open]);
 
   const activeRoomId = room && room.status !== 'CLOSED' ? room.roomId : null;
   const active = open && Boolean(activeRoomId);
@@ -220,27 +257,40 @@ export function useMemberChat(open, myUserId, loggedIn) {
     checkRoomClosed: checkRoomClosedOnReconnect,
   });
 
+  // 종료 상담을 보여줄 때는 실시간 연결(active) 없이 지난 메시지만 한 번 불러오고 그 자리에서 읽음 처리한다.
+  // 관리자 화면이 종료된 방을 다루는 방식과 같다. 읽음 처리까지 해 두면 배지가 0이 되고, 다음에 패널을
+  // 열 때는 위 조회에서 종료 상담이 빠져 새 상담 화면으로 돌아간다.
+  useEffect(() => {
+    if (!open || !closedRoom) return;
+    reloadMessages().then(() => markMemberRead(closedRoom.roomId).catch(() => {}));
+  }, [open, closedRoom, reloadMessages]);
+
   // 패널이 닫혀 있는 동안 플로팅 버튼 배지용 안읽은 수를 확인한다. 폴링 대신, 알림과 같은 SSE 연결로
   // 관리자가 메시지를 보내거나 상담을 종료할 때마다 오는 'chat-unread' 신호(chatUnreadBus 경유)를 받아 다시 조회한다.
-  const wasActiveRef = useRef(active);
+  // 배지 대상은 열린 방뿐 아니라 "안읽은 메시지가 남은 종료 상담"도 포함한다. 그래야 상담이 종료된 뒤
+  // 새로고침해도 볼 게 남아 있다는 걸 알 수 있다(이게 빠지면 배지는 0인데 읽을 메시지는 남게 된다).
+  const badgeRoomId = activeRoomId ?? closedRoom?.roomId ?? null;
+  // 패널에서 그 방을 보고 있는 중이면 배지는 필요 없다.
+  const showingRoom = open && Boolean(badgeRoomId);
+  const wasShowingRef = useRef(showingRoom);
   useEffect(() => {
-    const wasActive = wasActiveRef.current;
-    wasActiveRef.current = active;
+    const wasShowing = wasShowingRef.current;
+    wasShowingRef.current = showingRoom;
 
-    if (active || !activeRoomId) {
+    if (showingRoom || !badgeRoomId) {
       setBadgeCount(0);
       return undefined;
     }
     const check = () =>
-      getMemberUnreadCount(activeRoomId)
+      getMemberUnreadCount(badgeRoomId)
         .then((r) => setBadgeCount(r.data))
         .catch(() => {});
-    // 방금까지 패널이 열려 있었다면(wasActive) 그 동안은 소켓이 메시지를 실시간으로 읽음 처리했으므로
+    // 방금까지 패널이 열려 있었다면(wasShowing) 그 동안은 소켓이 메시지를 실시간으로 읽음 처리했으므로
     // 안읽은 수는 이미 0이다 — 다시 물어볼 필요 없다. 새로고침 등으로 패널이 처음부터 닫힌 채
     // 방을 발견한 경우에만(로그인 전에 쌓였을 수 있는 값이라 SSE로 못 받았으므로) 한 번 확인한다.
-    if (!wasActive) check();
+    if (!wasShowing) check();
     return subscribeChatUnread(check);
-  }, [active, activeRoomId]);
+  }, [showingRoom, badgeRoomId]);
 
   const send = async (content) => {
     // 종료된 방에서는 이어서 보낼 수 없다(입력창도 막혀 있다). 패널을 닫았다가 다시 열면
