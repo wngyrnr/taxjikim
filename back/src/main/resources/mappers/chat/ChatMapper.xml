@@ -87,6 +87,20 @@
           AND IS_READ = FALSE
     </update>
 
+    <!--
+        상대방이 보낸 메시지 중 지정한 1건만 읽음 처리한다.
+        실시간 전달(deliverToCounterpart)이 성공한 그 메시지만 읽음으로 바꾸기 위한 것이다. 방 전체를 처리하는
+        markMessagesAsRead를 쓰면, 아직 상대에게 전달된 적 없는 메시지까지 읽음이 되어 배지로 알 기회가 사라진다.
+    -->
+    <update id="markMessageAsRead">
+        UPDATE chat_messages
+        SET IS_READ = TRUE
+        WHERE MESSAGE_ID = #{messageId}
+          AND ROOM_ID = #{roomId}
+          AND SENDER_ID != #{readerId}
+          AND IS_READ = FALSE
+    </update>
+
     <!-- 상대방이 보낸 안 읽은 메시지 수 (읽음 배지에 사용) -->
     <select id="countUnreadByRoomId" resultType="long">
         SELECT COUNT(*)

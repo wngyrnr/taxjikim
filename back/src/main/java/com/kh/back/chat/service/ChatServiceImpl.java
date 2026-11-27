@@ -5,6 +5,7 @@ import com.kh.back.chat.dto.ChatRoomDto;
 import com.kh.back.chat.dto.ChatHistoryRoomDto;
 import com.kh.back.chat.dto.ChatRoomPageDto;
 import com.kh.back.chat.dto.ChatRoomSummaryDto;
+import com.kh.back.chat.event.ChatMessageSentEvent;
 import com.kh.back.chat.event.ChatRoomClosedEvent;
 import com.kh.back.chat.mapper.ChatMapper;
 import com.kh.back.common.exception.ApiException;
@@ -104,6 +105,10 @@ public class ChatServiceImpl implements ChatService {
         if (!senderId.equals(room.getUserId())) {
             notifyMemberUnreadChanged(room.getUserId());
         }
+        // 상대방이 그 방에 연결돼 있으면 실시간으로 전달한다. REST로 보냈든 WebSocket으로 보냈든 저장은 모두
+        // 이 메서드를 거치므로, 전달도 여기서 한 번만 알리면 양쪽 경로가 같게 동작한다.
+        // 실제 전송은 ChatWebSocketHandler가 이 트랜잭션의 커밋 이후에 처리한다(ChatMessageSentEvent 주석 참고).
+        eventPublisher.publishEvent(new ChatMessageSentEvent(roomId, senderId, saved));
         return saved;
     }
 
@@ -125,6 +130,13 @@ public class ChatServiceImpl implements ChatService {
     public void markAsRead(Long roomId, Long requesterId) {
         requireOwnRoom(roomId, requesterId);
         chatMapper.markMessagesAsRead(roomId, requesterId);
+    }
+
+    @Override
+    @Transactional
+    public void markMessageAsRead(Long roomId, Long messageId, Long requesterId) {
+        requireOwnRoom(roomId, requesterId);
+        chatMapper.markMessageAsRead(roomId, messageId, requesterId);
     }
 
     @Override
@@ -255,6 +267,13 @@ public class ChatServiceImpl implements ChatService {
     public void markAsReadForAdmin(Long roomId, Long adminId) {
         requireAdminRoom(roomId, adminId);
         chatMapper.markMessagesAsRead(roomId, adminId);
+    }
+
+    @Override
+    @Transactional
+    public void markMessageAsReadForAdmin(Long roomId, Long messageId, Long adminId) {
+        requireAdminRoom(roomId, adminId);
+        chatMapper.markMessageAsRead(roomId, messageId, adminId);
     }
 
     @Override

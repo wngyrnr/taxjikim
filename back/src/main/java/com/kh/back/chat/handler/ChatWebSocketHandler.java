@@ -2,6 +2,7 @@ package com.kh.back.chat.handler;
 
 import com.kh.back.chat.dto.ChatMessageDto;
 import com.kh.back.chat.dto.ChatRoomDto;
+import com.kh.back.chat.event.ChatMessageSentEvent;
 import com.kh.back.chat.event.ChatRoomClosedEvent;
 import com.kh.back.chat.service.ChatService;
 import com.kh.back.common.exception.ApiException;
@@ -92,16 +93,22 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         }
 
         // 2. 저장은 REST와 같은 검증 로직(빈 내용 금지, 종료된 방 금지 등)을 그대로 쓴다.
-        ChatMessageDto saved;
         try {
-            saved = chatService.sendMessage(Long.valueOf(roomId), senderId, content);
+            chatService.sendMessage(Long.valueOf(roomId), senderId, content);
         } catch (ApiException e) {
             sendError(session, e.getCode(), e.getMessage());
             return;
         }
 
-        // 3. 저장에 성공한 메시지만 상대방에게 실시간으로 전달한다.
-        deliverToCounterpart(roomId, senderId, saved);
+        // 3. 상대방 전달은 여기서 직접 하지 않는다. 저장이 커밋되면 ChatServiceImpl이 ChatMessageSentEvent를
+        //    발행하고 아래 onMessageSent가 전달한다 — REST로 보낸 메시지와 같은 경로를 쓰기 위해서다.
+    }
+
+    // 메시지 저장이 커밋된 뒤 상대방에게 전달한다. REST(POST /messages)로 보낸 메시지도 이 경로를 타므로,
+    // 소켓이 아직 연결되기 전이거나 재연결을 기다리는 동안 보낸 답변도 상대 화면에 실시간으로 뜬다.
+    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+    public void onMessageSent(ChatMessageSentEvent event) {
+        deliverToCounterpart(String.valueOf(event.roomId()), event.senderId(), event.message());
     }
 
     // 저장된 메시지를 같은 방의 "상대방"(발신자 본인이 아닌 세션)에게 전달하고, 실제로 전달됐을 때만 읽음 처리한다.
@@ -117,7 +124,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             }
             // 전송에 실패하면(끊기는 중인 연결 등) 그 메시지는 읽음 처리하지 않는다 — 상대가 실제로 받지 못했으므로.
             if (sendMessage(recipient, saved)) {
-                markAsReadQuietly(Long.valueOf(roomId), recipientId, (String) recipient.getAttributes().get("role"));
+                markDeliveredAsReadQuietly(Long.valueOf(roomId), saved.getMessageId(), recipientId,
+                        (String) recipient.getAttributes().get("role"));
             }
         }
     }
@@ -142,12 +150,29 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             boolean delivered = send(recipient,
                     Map.of("type", "MESSAGE", "message", event.notice(), "roomClosed", true));
             if (delivered) {
-                markAsReadQuietly(event.roomId(), recipientId, (String) recipient.getAttributes().get("role"));
+                markDeliveredAsReadQuietly(event.roomId(), event.notice().getMessageId(), recipientId,
+                        (String) recipient.getAttributes().get("role"));
             }
         }
     }
 
-    // 회원용/관리자용 읽음 처리 메서드가 따로 있어서 role로 분기한다. 실시간 알림용 부가 처리라 실패해도 메시지 전달 자체는 막지 않는다.
+    // 방금 전달에 성공한 메시지 1건만 읽음 처리한다. 방 전체를 처리하면(markAsReadQuietly) 아직 상대에게
+    // 전달된 적 없는 메시지까지 읽음이 되어, 상대가 배지로 알아챌 기회가 사라진다.
+    private void markDeliveredAsReadQuietly(Long roomId, Long messageId, Long recipientId, String recipientRole) {
+        try {
+            if ("ADMIN".equals(recipientRole)) {
+                chatService.markMessageAsReadForAdmin(roomId, messageId, recipientId);
+            } else {
+                chatService.markMessageAsRead(roomId, messageId, recipientId);
+            }
+        } catch (ApiException e) {
+            log.warn("실시간 읽음 처리 실패: roomId={}, messageId={}, recipientId={}, code={}", roomId, messageId,
+                    recipientId, e.getCode());
+        }
+    }
+
+    // 접속 시점의 backlog처럼 방 전체를 읽음 처리할 때 쓴다. role로 회원용/관리자용 메서드를 가른다.
+    // 실시간 알림용 부가 처리라 실패해도 메시지 전달 자체는 막지 않는다.
     private void markAsReadQuietly(Long roomId, Long recipientId, String recipientRole) {
         try {
             if ("ADMIN".equals(recipientRole)) {

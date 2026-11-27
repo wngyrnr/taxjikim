@@ -38,6 +38,10 @@ public interface ChatMapper {
     // 상대방이 보낸 메시지를 읽음 처리 (본인이 보낸 메시지는 제외)
     int markMessagesAsRead(@Param("roomId") Long roomId, @Param("readerId") Long readerId);
 
+    // 상대방이 보낸 메시지 중 지정한 1건만 읽음 처리. 실시간 전달에 성공한 메시지만 읽음으로 바꿀 때 쓴다
+    int markMessageAsRead(@Param("roomId") Long roomId, @Param("messageId") Long messageId,
+                          @Param("readerId") Long readerId);
+
     // 상대방이 보낸 안 읽은 메시지 수 조회
     long countUnreadByRoomId(@Param("roomId") Long roomId, @Param("readerId") Long readerId);
 
