@@ -184,3 +184,4 @@ workers
 
 # 환경변수가 올라간 설정파일
 back/src/main/resources/application-local.yml
+back/src/main/resources/.env
